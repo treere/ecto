@@ -190,6 +190,39 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  defmodule MyCompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :name, :string
+      field :org_id, :integer
+      field :parent_id, :integer
+    end
+  end
+
+  defmodule MyCompositeParent do
+    use Ecto.Schema
+
+    @primary_key {:id, :integer, []}
+    schema "composite_parents" do
+      field :org_id, :integer
+      has_many :children, MyCompositeChild, references: [org_id: :org_id, id: :parent_id]
+
+      has_one :child, MyCompositeChild, references: [org_id: :org_id, id: :parent_id]
+    end
+  end
+
+  defmodule MyCompositeBelongsToChild do
+    use Ecto.Schema
+
+    schema "composite_bt_children" do
+      field :name, :string
+
+      belongs_to :composite_parent, MyCompositeParent,
+        references: [org_id: :org_id, parent_id: :id]
+    end
+  end
+
   test "defines child_spec/1" do
     assert TestRepo.child_spec([]) == %{
              id: TestRepo,
@@ -2028,7 +2061,11 @@ defmodule Ecto.RepoTest do
     test "includes conflict target in :replace_all when replace_changed is false" do
       fields = [:map, :array, :z, :yyy, :x, :id]
 
-      TestRepo.insert(%MySchema{id: 1}, on_conflict: :replace_all, conflict_target: [:id], replace_changed: false)
+      TestRepo.insert(%MySchema{id: 1},
+        on_conflict: :replace_all,
+        conflict_target: [:id],
+        replace_changed: false
+      )
 
       assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], [:id]}}}
     end
@@ -2106,6 +2143,34 @@ defmodule Ecto.RepoTest do
       assert_raise Ecto.NoPrimaryKeyFieldError, fn ->
         TestRepo.all(query)
       end
+    end
+
+    test "preloads has_many with composite foreign keys" do
+      parent = %MyCompositeParent{id: 1, org_id: 10}
+      TestRepo.preload(parent, :children)
+      assert_received {:all, query}
+      assert query.from.source == {"composite_children", MyCompositeChild}
+    end
+
+    test "preloads has_one with composite foreign keys" do
+      parent = %MyCompositeParent{id: 1, org_id: 10}
+      TestRepo.preload(parent, :child)
+      assert_received {:all, query}
+      assert query.from.source == {"composite_children", MyCompositeChild}
+    end
+
+    test "preloads belongs_to with composite foreign keys" do
+      child = %MyCompositeBelongsToChild{id: 1, org_id: 5, parent_id: 10}
+      TestRepo.preload(child, :composite_parent)
+      assert_received {:all, query}
+      assert query.from.source == {"composite_parents", MyCompositeParent}
+    end
+
+    test "preloads composite FK with nil key skips query" do
+      parent = %MyCompositeParent{id: nil, org_id: 10}
+      result = TestRepo.preload(parent, :children)
+      assert result.children == []
+      refute_received {:all, _}
     end
 
     test "raise if a combination query is used to preload a many association" do

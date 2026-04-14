@@ -1286,4 +1286,159 @@ defmodule Ecto.SchemaTest do
                    end
                  end
   end
+
+  describe "composite foreign keys" do
+    defmodule Parent do
+      use Ecto.Schema
+
+      @primary_key {:id, :integer, []}
+      schema "parents" do
+        field :org_id, :integer
+        field :code, :string
+        field :name, :string
+      end
+    end
+
+    defmodule ChildWithCompositeFK do
+      use Ecto.Schema
+
+      schema "children" do
+        belongs_to :parent, Parent, references: [org_id: :org_id, parent_code: :code]
+      end
+    end
+
+    test "belongs_to accepts composite references" do
+      refl = ChildWithCompositeFK.__schema__(:association, :parent)
+      assert [:org_id, :parent_code] == refl.owner_key
+      assert [:org_id, :code] == refl.related_key
+    end
+
+    defmodule ParentWithCompositePK do
+      use Ecto.Schema
+
+      @primary_key {:id, :integer, []}
+      schema "parents" do
+        field :org_id, :integer
+        has_many :children, ChildWithCompositeFK, references: [org_id: :org_id, id: :id]
+      end
+    end
+
+    test "has_many accepts composite references" do
+      refl = ParentWithCompositePK.__schema__(:association, :children)
+      assert [:org_id, :id] == refl.owner_key
+      assert [:org_id, :id] == refl.related_key
+    end
+
+    defmodule ParentWithCompositeHasOne do
+      use Ecto.Schema
+
+      @primary_key {:id, :integer, []}
+      schema "parents" do
+        field :org_id, :integer
+        has_one :child, ChildWithCompositeFK, references: [org_id: :org_id, id: :id]
+      end
+    end
+
+    test "has_one accepts composite references" do
+      refl = ParentWithCompositeHasOne.__schema__(:association, :child)
+      assert [:org_id, :id] == refl.owner_key
+      assert [:org_id, :id] == refl.related_key
+    end
+
+    test "belongs_to composite defines multiple foreign key fields" do
+      fields = ChildWithCompositeFK.__schema__(:fields)
+      assert :org_id in fields
+      assert :parent_code in fields
+    end
+
+    test "belongs_to composite stores changeset fields for each FK" do
+      changeset_fields = ChildWithCompositeFK.__changeset__()
+      assert Map.has_key?(changeset_fields, :org_id)
+      assert Map.has_key?(changeset_fields, :parent_code)
+    end
+
+    test "has_many raises on invalid composite reference field" do
+      assert_raise ArgumentError,
+                   ~r"schema does not have the field :nonexistent used by association :children",
+                   fn ->
+                     defmodule ParentBadCompositeHasMany do
+                       use Ecto.Schema
+
+                       @primary_key {:id, :integer, []}
+                       schema "parents" do
+                         field :org_id, :integer
+
+                         has_many :children, ChildWithCompositeFK,
+                           references: [nonexistent: :org_id, id: :id]
+                       end
+                     end
+                   end
+    end
+
+    defmodule TripleKeyParent do
+      use Ecto.Schema
+
+      @primary_key {:id, :integer, []}
+      schema "triple_parents" do
+        field :org_id, :integer
+        field :region, :string
+      end
+    end
+
+    defmodule TripleKeyChild do
+      use Ecto.Schema
+
+      schema "triple_children" do
+        belongs_to :parent, TripleKeyParent,
+          references: [org_id: :org_id, region_code: :region, parent_id: :id]
+      end
+    end
+
+    defmodule TripleKeyParentWithHasMany do
+      use Ecto.Schema
+
+      @primary_key {:id, :integer, []}
+      schema "triple_parents" do
+        field :org_id, :integer
+        field :region, :string
+
+        has_many :children, TripleKeyChild,
+          references: [org_id: :org_id, region: :region_code, id: :parent_id]
+      end
+    end
+
+    test "belongs_to with 3-field composite references" do
+      refl = TripleKeyChild.__schema__(:association, :parent)
+      assert [:org_id, :region_code, :parent_id] == refl.owner_key
+      assert [:org_id, :region, :id] == refl.related_key
+    end
+
+    test "has_many with 3-field composite references" do
+      refl = TripleKeyParentWithHasMany.__schema__(:association, :children)
+      assert [:org_id, :region, :id] == refl.owner_key
+      assert [:org_id, :region_code, :parent_id] == refl.related_key
+    end
+
+    test "belongs_to 3-field composite defines all FK fields" do
+      fields = TripleKeyChild.__schema__(:fields)
+      assert :org_id in fields
+      assert :region_code in fields
+      assert :parent_id in fields
+    end
+
+    test "belongs_to composite with foreign_key name matching assoc name raises" do
+      assert_raise ArgumentError,
+                   ~r"foreign_key .* must be distinct from corresponding association name",
+                   fn ->
+                     defmodule ChildBadCompositeBelongsTo do
+                       use Ecto.Schema
+
+                       schema "children" do
+                         belongs_to :parent, Parent,
+                           references: [parent: :org_id, parent_code: :code]
+                       end
+                     end
+                   end
+    end
+  end
 end

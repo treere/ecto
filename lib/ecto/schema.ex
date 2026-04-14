@@ -2163,21 +2163,50 @@ defmodule Ecto.Schema do
 
   @doc false
   def __belongs_to__(mod, name, queryable, opts) do
-    opts = Keyword.put_new(opts, :foreign_key, :"#{name}_id")
+    references = opts[:references]
 
-    foreign_key_name = opts[:foreign_key]
+    if is_list(references) do
+      define_composite_belongs_to(mod, name, queryable, opts, references)
+    else
+      opts = Keyword.put_new(opts, :foreign_key, :"#{name}_id")
+      foreign_key_name = opts[:foreign_key]
+      foreign_key_type = opts[:type] || Module.get_attribute(mod, :foreign_key_type, :id)
+      foreign_key_type = check_field_type!(mod, name, foreign_key_type, opts)
+      check_options!(foreign_key_type, opts, @valid_belongs_to_options, "belongs_to/3")
+
+      if foreign_key_name == name do
+        raise ArgumentError,
+              "foreign_key #{inspect(name)} must be distinct from corresponding association name"
+      end
+
+      if Keyword.get(opts, :define_field, true) do
+        Module.put_attribute(mod, :ecto_changeset_fields, {foreign_key_name, foreign_key_type})
+        define_field(mod, foreign_key_name, foreign_key_type, opts)
+      end
+
+      struct =
+        association(mod, :one, name, Ecto.Association.BelongsTo, [queryable: queryable] ++ opts)
+
+      Module.put_attribute(mod, :ecto_changeset_fields, {name, {:assoc, struct}})
+    end
+  end
+
+  defp define_composite_belongs_to(mod, name, queryable, opts, references) do
     foreign_key_type = opts[:type] || Module.get_attribute(mod, :foreign_key_type, :id)
-    foreign_key_type = check_field_type!(mod, name, foreign_key_type, opts)
     check_options!(foreign_key_type, opts, @valid_belongs_to_options, "belongs_to/3")
+    foreign_key_names = Keyword.keys(references)
 
-    if foreign_key_name == name do
+    if name in foreign_key_names do
       raise ArgumentError,
             "foreign_key #{inspect(name)} must be distinct from corresponding association name"
     end
 
     if Keyword.get(opts, :define_field, true) do
-      Module.put_attribute(mod, :ecto_changeset_fields, {foreign_key_name, foreign_key_type})
-      define_field(mod, foreign_key_name, foreign_key_type, opts)
+      for foreign_key_name <- foreign_key_names do
+        foreign_key_type = check_field_type!(mod, name, foreign_key_type, opts)
+        Module.put_attribute(mod, :ecto_changeset_fields, {foreign_key_name, foreign_key_type})
+        define_field(mod, foreign_key_name, foreign_key_type, opts)
+      end
     end
 
     struct =

@@ -152,6 +152,55 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
+  defmodule CompositeParent do
+    use Ecto.Schema
+
+    @primary_key {:id, :integer, []}
+    schema "composite_parents" do
+      field :org_id, :integer
+      field :code, :string
+
+      has_many :composite_children, Ecto.Query.PlannerTest.CompositeChild,
+        references: [org_id: :org_id, id: :parent_id]
+
+      has_one :composite_child, Ecto.Query.PlannerTest.CompositeChild,
+        references: [org_id: :org_id, id: :parent_id]
+    end
+  end
+
+  defmodule CompositeChild do
+    use Ecto.Schema
+
+    schema "composite_children" do
+      field :name, :string
+      belongs_to :composite_parent, CompositeParent, references: [org_id: :org_id, parent_id: :id]
+    end
+  end
+
+  defmodule TripleCompositeParent do
+    use Ecto.Schema
+
+    @primary_key {:id, :integer, []}
+    schema "triple_parents" do
+      field :org_id, :integer
+      field :region, :string
+
+      has_many :triple_children, Ecto.Query.PlannerTest.TripleCompositeChild,
+        references: [org_id: :org_id, region: :region_code, id: :parent_id]
+    end
+  end
+
+  defmodule TripleCompositeChild do
+    use Ecto.Schema
+
+    schema "triple_children" do
+      field :name, :string
+
+      belongs_to :triple_parent, TripleCompositeParent,
+        references: [org_id: :org_id, region_code: :region, parent_id: :id]
+    end
+  end
+
   defp plan(query, operation \\ :all) do
     {query, params, key} = Planner.plan(query, operation, Ecto.TestAdapter)
     {cast_params, dump_params} = Enum.unzip(params)
@@ -478,6 +527,83 @@ defmodule Ecto.Query.PlannerTest do
     assert Enum.map(query.joins, & &1.ix) == [1, 2]
     assert Macro.to_string(join1.on.expr) == "&0.post_id() == &1.post_id()"
     assert Macro.to_string(join2.on.expr) == "&2.id() == &0.post_id()"
+  end
+
+  test "plan: joins associations with composite keys (has_many)" do
+    query = from(p in CompositeParent, join: assoc(p, :composite_children)) |> plan |> elem(0)
+    assert %JoinExpr{on: on, source: source, assoc: nil, qual: :inner} = hd(query.joins)
+    assert source == {"composite_children", CompositeChild}
+
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.parent_id() == &0.id()"
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "and"
+  end
+
+  test "plan: joins associations with composite keys (has_one)" do
+    query = from(p in CompositeParent, left_join: assoc(p, :composite_child)) |> plan |> elem(0)
+    assert %JoinExpr{on: on, source: source, assoc: nil, qual: :left} = hd(query.joins)
+    assert source == {"composite_children", CompositeChild}
+
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.parent_id() == &0.id()"
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "and"
+  end
+
+  test "plan: joins associations with composite keys (belongs_to)" do
+    query = from(c in CompositeChild, join: assoc(c, :composite_parent)) |> plan |> elem(0)
+    assert %JoinExpr{on: on, source: source, assoc: nil, qual: :inner} = hd(query.joins)
+    assert source == {"composite_parents", CompositeParent}
+
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.id() == &0.parent_id()"
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "and"
+  end
+
+  test "plan: joins associations with composite keys and additional on clause" do
+    query =
+      from(p in CompositeParent,
+        left_join: c in assoc(p, :composite_children),
+        on: c.name == ^"test"
+      )
+      |> plan
+      |> elem(0)
+
+    assert %JoinExpr{on: on} = hd(query.joins)
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "&1.parent_id() == &0.id()"
+    assert on_str =~ "&1.name() == ^"
+  end
+
+  test "plan: joins associations with 3-field composite keys (has_many)" do
+    query =
+      from(p in TripleCompositeParent, join: assoc(p, :triple_children)) |> plan |> elem(0)
+
+    assert %JoinExpr{on: on, source: source} = hd(query.joins)
+    assert source == {"triple_children", TripleCompositeChild}
+
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "&1.region_code() == &0.region()"
+    assert on_str =~ "&1.parent_id() == &0.id()"
+    # Should have two 'and' operators for 3 conditions
+    assert length(String.split(on_str, " and ")) >= 3
+  end
+
+  test "plan: joins associations with 3-field composite keys (belongs_to)" do
+    query =
+      from(c in TripleCompositeChild, join: assoc(c, :triple_parent)) |> plan |> elem(0)
+
+    assert %JoinExpr{on: on, source: source} = hd(query.joins)
+    assert source == {"triple_parents", TripleCompositeParent}
+
+    on_str = Macro.to_string(on.expr)
+    assert on_str =~ "&1.org_id() == &0.org_id()"
+    assert on_str =~ "&1.region() == &0.region_code()"
+    assert on_str =~ "&1.id() == &0.parent_id()"
   end
 
   test "plan: joins associations with custom queries" do

@@ -324,7 +324,12 @@ defmodule Ecto.Query.Planner do
        when kind in [:fragment, :values],
        do: {expr, source}
 
-  defp plan_source(_query, %{source: {{:fragment, _, _} = source, schema}, prefix: nil} = expr, _adapter, _cte_names)
+  defp plan_source(
+         _query,
+         %{source: {{:fragment, _, _} = source, schema}, prefix: nil} = expr,
+         _adapter,
+         _cte_names
+       )
        when is_atom(schema) do
     {expr, {source, schema, nil}}
   end
@@ -333,8 +338,14 @@ defmodule Ecto.Query.Planner do
        when kind in [:fragment, :values],
        do: error!(query, expr, "cannot set prefix: #{inspect(prefix)} option for #{kind} sources")
 
-  defp plan_source(query, %{source: {{:fragment, _, _}, _schema}, prefix: prefix} = expr, _adapter, _cte_names),
-       do: error!(query, expr, "cannot set prefix: #{inspect(prefix)} option for fragment sources")
+  defp plan_source(
+         query,
+         %{source: {{:fragment, _, _}, _schema}, prefix: prefix} = expr,
+         _adapter,
+         _cte_names
+       ),
+       do:
+         error!(query, expr, "cannot set prefix: #{inspect(prefix)} option for fragment sources")
 
   defp plan_subquery(subquery, query, prefix, adapter, source?, cte_names) do
     %{query: inner_query} = subquery
@@ -591,6 +602,14 @@ defmodule Ecto.Query.Planner do
     unless refl do
       error!(query, join, "could not find association `#{assoc}` on schema #{inspect(schema)}")
     end
+
+    on =
+      if is_list(refl.owner_key) and is_list(refl.related_key) do
+        composite_on = composite_join_on(refl.owner_key, refl.related_key)
+        merge_expr_and_params(:and, on, composite_on.expr, composite_on.params)
+      else
+        on
+      end
 
     # If we have the following join:
     #
@@ -2213,7 +2232,7 @@ defmodule Ecto.Query.Planner do
         schema = if kind == :map, do: nil, else: schema
         {{:source, {source, schema}, prefix || query.prefix, types}, fields}
 
-      {{:ok, {kind, fields}}, {{:fragment, _, _} = source, schema, prefix}}  ->
+      {{:ok, {kind, fields}}, {{:fragment, _, _} = source, schema, prefix}} ->
         {types, fields} = select_dump_for_schema(schema, List.wrap(fields), ix, drop)
         schema = if kind == :map, do: nil, else: schema
         {{:source, {source, schema}, prefix, types}, fields}
@@ -2275,10 +2294,14 @@ defmodule Ecto.Query.Planner do
 
     schema =
       case select do
-        {:source, {_, schema}, _, _} when not is_nil(schema) -> schema
+        {:source, {_, schema}, _, _} when not is_nil(schema) ->
+          schema
 
         _ ->
-          error!(query, "it is not possible to return a struct subset of a subquery that does not return a schema struct")
+          error!(
+            query,
+            "it is not possible to return a struct subset of a subquery that does not return a schema struct"
+          )
       end
 
     types =
@@ -2288,8 +2311,11 @@ defmodule Ecto.Query.Planner do
             {field, type}
 
           :error ->
-            error!(query, "field `#{field}` in struct/2 is not available in the subquery. " <>
-                         "Subquery only returns fields: #{inspect(available_fields)}")
+            error!(
+              query,
+              "field `#{field}` in struct/2 is not available in the subquery. " <>
+                "Subquery only returns fields: #{inspect(available_fields)}"
+            )
         end
       end)
 
@@ -2552,7 +2578,9 @@ defmodule Ecto.Query.Planner do
     input_string = Atom.to_string(input)
 
     schema.__schema__(:fields)
-    |> Enum.map(fn field -> {field, String.jaro_distance(input_string, Atom.to_string(field))} end)
+    |> Enum.map(fn field ->
+      {field, String.jaro_distance(input_string, Atom.to_string(field))}
+    end)
     |> Enum.filter(fn {_field, score} -> score >= 0.77 end)
     |> Enum.sort(&(elem(&1, 0) >= elem(&2, 0)))
     |> Enum.take(5)
@@ -2753,5 +2781,23 @@ defmodule Ecto.Query.Planner do
       file: expr.file,
       line: expr.line,
       hint: hint
+  end
+
+  defp composite_join_on(owner_key, related_key) do
+    pairs = Enum.zip([owner_key, related_key])
+    expr = build_composite_on(pairs)
+    %{expr: expr, params: []}
+  end
+
+  defp build_composite_on([{ok, rk}]) do
+    {:==, [], [access_field(1, rk), access_field(0, ok)]}
+  end
+
+  defp build_composite_on([{ok, rk} | rest]) do
+    {:and, [], [build_composite_on(rest), {:==, [], [access_field(1, rk), access_field(0, ok)]}]}
+  end
+
+  defp access_field(ix, field) do
+    {{:., [], [{:&, [], [ix]}, field]}, [], []}
   end
 end

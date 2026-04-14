@@ -327,15 +327,15 @@ defmodule Ecto.Repo.Preloader do
 
       struct, {fetch_ids, loaded_ids, loaded_structs} ->
         assert_struct!(module, struct)
-        %{^owner_key => id, ^field => value} = struct
+        {id, value} = fetch_owner_key_and_value(struct, owner_key, field)
         loaded? = Ecto.assoc_loaded?(value) and not force?
 
         if loaded? and is_nil(id) and not Ecto.Changeset.Relation.empty?(assoc, value) do
           Logger.warning("""
           association `#{field}` for `#{inspect(module)}` has a loaded value but \
-          its association key `#{owner_key}` is nil. This usually means one of:
+          its association key `#{inspect(owner_key)}` is nil. This usually means one of:
 
-            * `#{owner_key}` was not selected in a query
+            * `#{inspect(owner_key)}` was not selected in a query
             * the struct was set with default values for `#{field}` which now you want to override
 
           If this is intentional, set force: true to disable this warning
@@ -358,6 +358,18 @@ defmodule Ecto.Repo.Preloader do
     end)
   end
 
+  defp fetch_owner_key_and_value(struct, owner_key, field) when is_list(owner_key) do
+    id = Enum.map(owner_key, &Map.fetch!(struct, &1))
+    id = if Enum.any?(id, &is_nil/1), do: nil, else: id
+    value = Map.fetch!(struct, field)
+    {id, value}
+  end
+
+  defp fetch_owner_key_and_value(struct, owner_key, field) do
+    %{^owner_key => id, ^field => value} = struct
+    {id, value}
+  end
+
   defp fetch_query(ids, assoc, _repo_name, query, _prefix, related_key, _take, _tuplet)
        when is_function(query, 1) or is_function(query, 2) do
     # Note we use an explicit sort because we don't want
@@ -367,6 +379,65 @@ defmodule Ecto.Repo.Preloader do
     |> preload_function(assoc, query)
     |> fetched_records_to_tuple_ids(assoc, related_key)
     |> Enum.sort(fn {id1, _}, {id2, _} -> id1 <= id2 end)
+    |> unzip_ids([], [])
+  end
+
+  defp fetch_query(
+         ids,
+         %{cardinality: card} = assoc,
+         repo_name,
+         query,
+         prefix,
+         {pos, related_keys} = _related_key,
+         take,
+         tuplet
+       )
+       when is_list(related_keys) do
+    query = assoc.__struct__.assoc_query(assoc, query, Enum.uniq(ids))
+    related_field_asts = Enum.map(related_keys, &related_key_to_field(query, {pos, &1}))
+
+    # Normalize query
+    query = %{Ecto.Query.Planner.ensure_select(query, take || true) | prefix: prefix}
+
+    # Add composite related keys as a tuple to the query results
+    composite_select = {:{}, [], related_field_asts}
+    query = update_in(query.select.expr, &{:{}, [], [composite_select, &1]})
+
+    # If we are returning many results, we must sort by the composite keys too
+    query =
+      case {card, query.combinations} do
+        {:many, [{kind, _} | []]} ->
+          raise ArgumentError,
+                "`#{kind}` queries must be wrapped inside of a subquery " <>
+                  "when preloading a `has_many` or `many_to_many` association. " <>
+                  "You must also ensure that all members of the `#{kind}` query " <>
+                  "select the parent's foreign key"
+
+        {:many, _} ->
+          query = add_preload_order(assoc.preload_order, query)
+
+          order_exprs = Enum.map(related_field_asts, &{:asc, &1})
+
+          update_in(query.order_bys, fn order_bys ->
+            [
+              %Ecto.Query.ByExpr{
+                expr: order_exprs,
+                params: [],
+                file: __ENV__.file,
+                line: __ENV__.line
+              }
+              | order_bys
+            ]
+          end)
+
+        {:one, _} ->
+          query
+      end
+
+    # The query results come back as {{v1, v2, ...}, struct} tuples.
+    # We need to convert them to {[v1, v2, ...], struct} for consistency with fetch_ids.
+    Ecto.Repo.Queryable.all(repo_name, query, tuplet)
+    |> Enum.map(fn {composite_tuple, struct} -> {Tuple.to_list(composite_tuple), struct} end)
     |> unzip_ids([], [])
   end
 
@@ -427,6 +498,10 @@ defmodule Ecto.Repo.Preloader do
   defp fetched_records_to_tuple_ids([], _assoc, _related_key),
     do: []
 
+  defp fetched_records_to_tuple_ids([%{} | _] = entries, _assoc, {0, keys})
+       when is_list(keys),
+       do: Enum.map(entries, &{Enum.map(keys, fn k -> Map.fetch!(&1, k) end), &1})
+
   defp fetched_records_to_tuple_ids([%{} | _] = entries, _assoc, {0, key}),
     do: Enum.map(entries, &{Map.fetch!(&1, key), &1})
 
@@ -483,7 +558,7 @@ defmodule Ecto.Repo.Preloader do
 
   defp add_preload_order([], query), do: query
 
-  defp add_preload_order(_order, %{order_bys: [_|_]} = query) do
+  defp add_preload_order(_order, %{order_bys: [_ | _]} = query) do
     # Skip applying preload_order when query already has custom order_by clauses
     query
   end
@@ -584,7 +659,7 @@ defmodule Ecto.Repo.Preloader do
 
   defp load_assoc({:assoc, assoc, ids}, struct) do
     %{field: field, owner_key: owner_key, cardinality: cardinality} = assoc
-    key = Map.fetch!(struct, owner_key)
+    key = fetch_composite_or_single_key(struct, owner_key)
 
     loaded =
       case ids do
@@ -594,6 +669,14 @@ defmodule Ecto.Repo.Preloader do
       end
 
     Map.put(struct, field, loaded)
+  end
+
+  defp fetch_composite_or_single_key(struct, owner_key) when is_list(owner_key) do
+    Enum.map(owner_key, &Map.fetch!(struct, &1))
+  end
+
+  defp fetch_composite_or_single_key(struct, owner_key) do
+    Map.fetch!(struct, owner_key)
   end
 
   defp load_through({_, _, _}, nil), do: nil
